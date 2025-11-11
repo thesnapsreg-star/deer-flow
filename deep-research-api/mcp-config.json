@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "deep-research": {
+      "command": "python",
+      "args": [
+        "-m",
+        "mcp-server.server"
+      ],
+      "cwd": "/home/user/deer-flow/deep-research-api",
+      "env": {
+        "PYTHONPATH": "/home/user/deer-flow/deep-research-api"
+      },
+      "description": "Multi-agent deep research framework for comprehensive information gathering and analysis",
+      "timeout": 300000
+    }
+  }
+}
