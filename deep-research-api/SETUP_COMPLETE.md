@@ -53,12 +53,14 @@ cd /home/user/deer-flow/deep-research-api
 ### Step 2: Install Dependencies
 
 ```bash
-# Install the package with all dependencies
+# Option 1: Install from pyproject.toml (recommended)
 pip install -e .
 
-# Install additional required dependencies
-pip install --ignore-installed cffi cryptography markdownify lxml readabilipy json-repair
+# Option 2: Install from requirements.txt
+pip install -r requirements.txt
 ```
+
+**Note:** All required dependencies are now included in `pyproject.toml`. No additional manual installation needed.
 
 ### Step 3: Configure Environment
 
@@ -248,8 +250,10 @@ async function research(query) {
 
 **Solution:**
 ```bash
-cd /home/user/deer-flow/deep-research-api
-pip install --ignore-installed cffi cryptography markdownify lxml readabilipy json-repair
+# Reinstall the package to ensure all dependencies are installed
+cd deep-research-api
+pip install -e . --force-reinstall --no-deps
+pip install -e .
 ```
 
 ### Issue: API server won't start
