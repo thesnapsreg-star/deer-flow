@@ -97,17 +97,28 @@ async def research_sync(request: ResearchRequest):
             else settings.enable_background_investigation
         )
 
+        # Build initial state with all configuration
+        initial_state = {
+            "messages": [{"role": "user", "content": request.query}],
+            "locale": request.locale or "en-US",
+            "research_topic": request.query,
+            "clarified_research_topic": request.query,
+            "auto_accepted_plan": request.auto_accept_plan,
+            "enable_background_investigation": enable_background_investigation,
+        }
+
+        if enable_clarification is not None:
+            initial_state["enable_clarification"] = enable_clarification
+
         # Run research workflow
         result = await run_agent_workflow_async(
             user_input=request.query,
             debug=False,
             max_plan_iterations=max_plan_iterations,
             max_step_num=max_step_num,
-            locale=request.locale or "en-US",
-            enable_clarification=enable_clarification,
             enable_background_investigation=enable_background_investigation,
-            auto_accepted_plan=request.auto_accept_plan,
-            report_style=request.report_style or "academic",
+            enable_clarification=enable_clarification,
+            initial_state=initial_state,
         )
 
         # Extract plan information
@@ -207,25 +218,28 @@ async def research_stream(request: ResearchRequest):
             )
 
             # Create graph for streaming
-            graph = build_graph(
-                max_step_num=max_step_num,
-                enable_clarification=enable_clarification,
-                enable_background_investigation=enable_background_investigation,
-            )
+            graph = build_graph()
+
+            # Build input state with all configuration
+            input_state = {
+                "messages": [{"role": "user", "content": request.query}],
+                "locale": request.locale or "en-US",
+                "research_topic": request.query,
+                "clarified_research_topic": request.query,
+                "auto_accepted_plan": request.auto_accept_plan,
+                "enable_background_investigation": enable_background_investigation,
+            }
+
+            if enable_clarification is not None:
+                input_state["enable_clarification"] = enable_clarification
 
             # Stream graph execution
             config = {
                 "configurable": {
                     "thread_id": research_id,
                     "max_plan_iterations": max_plan_iterations,
-                    "auto_accepted_plan": request.auto_accept_plan,
-                    "report_style": request.report_style or "academic",
+                    "max_step_num": max_step_num,
                 }
-            }
-
-            input_state = {
-                "messages": [{"role": "user", "content": request.query}],
-                "locale": request.locale or "en-US",
             }
 
             async for chunk in graph.astream(input_state, config=config):
