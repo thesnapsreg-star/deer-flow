@@ -29,7 +29,7 @@ from api.models import (
 
 # Import research workflow
 from research_core.workflow import run_agent_workflow_async
-from research_core.graph.builder import create_graph
+from research_core.graph.builder import build_graph
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -207,7 +207,7 @@ async def research_stream(request: ResearchRequest):
             )
 
             # Create graph for streaming
-            graph = create_graph(
+            graph = build_graph(
                 max_step_num=max_step_num,
                 enable_clarification=enable_clarification,
                 enable_background_investigation=enable_background_investigation,

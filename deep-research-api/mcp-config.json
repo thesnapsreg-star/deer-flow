@@ -4,7 +4,7 @@
       "command": "python",
       "args": [
         "-m",
-        "mcp-server.server"
+        "mcp_server.server"
       ],
       "cwd": "/home/user/deer-flow/deep-research-api",
       "env": {
