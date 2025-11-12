@@ -163,6 +163,7 @@ async def run_agent_workflow_async(
             )
 
     logger.info("Async workflow completed successfully")
+    return final_state
 
 
 if __name__ == "__main__":
