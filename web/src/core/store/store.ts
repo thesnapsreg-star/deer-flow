@@ -24,6 +24,7 @@ export const useStore = create<{
   researchPlanIds: Map<string, string>;
   researchReportIds: Map<string, string>;
   researchActivityIds: Map<string, string[]>;
+  researchQueries: Map<string, string>;
   ongoingResearchId: string | null;
   openResearchId: string | null;
 
@@ -42,6 +43,7 @@ export const useStore = create<{
   researchPlanIds: new Map<string, string>(),
   researchReportIds: new Map<string, string>(),
   researchActivityIds: new Map<string, string[]>(),
+  researchQueries: new Map<string, string>(),
   ongoingResearchId: null,
   openResearchId: null,
 
@@ -115,6 +117,7 @@ export async function sendMessage(
       enable_deep_thinking: settings.enableDeepThinking ?? false,
       enable_background_investigation:
         settings.enableBackgroundInvestigation ?? true,
+      enable_web_search: settings.enableWebSearch ?? true,
       max_plan_iterations: settings.maxPlanIterations,
       max_step_num: settings.maxStepNum,
       max_search_results: settings.maxSearchResults,
@@ -266,11 +269,17 @@ function getOngoingResearchId() {
 
 function appendResearch(researchId: string) {
   let planMessage: Message | undefined;
+  let userQuery: string | undefined;
   const reversedMessageIds = [...useStore.getState().messageIds].reverse();
   for (const messageId of reversedMessageIds) {
     const message = getMessage(messageId);
-    if (message?.agent === "planner") {
+    if (!planMessage && message?.agent === "planner") {
       planMessage = message;
+    }
+    if (!userQuery && message?.role === "user") {
+      userQuery = message.content;
+    }
+    if (planMessage && userQuery) {
       break;
     }
   }
@@ -286,6 +295,10 @@ function appendResearch(researchId: string) {
     researchActivityIds: new Map(useStore.getState().researchActivityIds).set(
       researchId,
       messageIds,
+    ),
+    researchQueries: new Map(useStore.getState().researchQueries).set(
+      researchId,
+      userQuery ?? "",
     ),
   });
 }
@@ -391,6 +404,10 @@ export function useResearchMessage(researchId: string) {
       return messageId ? state.messages.get(messageId) : undefined;
     }),
   );
+}
+
+export function getResearchQuery(researchId: string): string {
+  return useStore.getState().researchQueries.get(researchId) ?? "";
 }
 
 export function useMessage(messageId: string | null | undefined) {

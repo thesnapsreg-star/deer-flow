@@ -32,6 +32,17 @@
     "addNewMCPServers": "添加新的 MCP 服务器",
     "mcpConfigDescription": "DeerFlow 使用标准 JSON MCP 配置来创建新服务器。",
     "pasteConfigBelow": "将您的配置粘贴到下面，然后点击\"添加\"来添加新服务器。",
+    "rag": {
+      "title": "资源",
+      "description": "在此管理您的知识库资源。上传 Markdown 或文本文件以供检索索引。",
+      "upload": "上传",
+      "uploading": "上传中...",
+      "uploadSuccess": "文件上传成功",
+      "uploadFailed": "文件上传失败",
+      "emptyFile": "无法上传空文件",
+      "loading": "正在加载资源...",
+      "noResources": "未找到资源。上传文件以开始使用。"
+    },
     "add": "添加",
     "general": {
       "title": "通用",
@@ -44,7 +55,9 @@
       "maxStepsOfPlan": "研究计划的最大步骤数",
       "maxStepsDescription": "默认情况下，每个研究计划有 3 个步骤。",
       "maxSearchResults": "最大搜索结果数",
-      "maxSearchResultsDescription": "默认情况下，每个搜索步骤有 3 个结果。"
+      "maxSearchResultsDescription": "默认情况下，每个搜索步骤有 3 个结果。",
+      "enableWebSearch": "启用网络搜索",
+      "enableWebSearchDescription": "禁用后将仅使用本地 RAG 知识库。适用于无网络环境。"
     },
     "mcp": {
       "title": "MCP 服务器",
@@ -130,7 +143,14 @@
       "generatePodcast": "生成播客",
       "edit": "编辑",
       "copy": "复制",
-      "downloadReport": "下载报告为 Markdown",
+      "downloadReport": "下载报告",
+      "downloadMarkdown": "Markdown (.md)",
+      "downloadHTML": "HTML (.html)",
+      "downloadPDF": "PDF (.pdf)",
+      "downloadWord": "Word (.docx)",
+      "downloadImage": "图片 (.png)",
+      "exportFailed": "导出失败，请重试",
+      "evaluateReport": "评估报告质量",
       "searchingFor": "搜索",
       "reading": "阅读中",
       "runningPythonCode": "运行 Python 代码",
@@ -143,6 +163,31 @@
       "podcast": "播客",
       "errorGeneratingPodcast": "生成播客时出错。请重试。",
       "downloadPodcast": "下载播客"
+    },
+    "evaluation": {
+      "title": "报告质量评估",
+      "description": "使用自动化指标和 AI 分析评估您的报告。",
+      "evaluating": "正在评估报告...",
+      "analyzing": "正在进行深度分析...",
+      "overallScore": "总体评分",
+      "metrics": "报告指标",
+      "wordCount": "字数",
+      "citations": "引用数",
+      "sources": "独立来源",
+      "images": "图片数",
+      "sectionCoverage": "章节覆盖率",
+      "detailedAnalysis": "详细分析",
+      "deepEvaluation": "深度评估 (AI)",
+      "strengths": "优势",
+      "weaknesses": "改进建议",
+      "scores": {
+        "factual_accuracy": "事实准确性",
+        "completeness": "完整性",
+        "coherence": "连贯性",
+        "relevance": "相关性",
+        "citation_quality": "引用质量",
+        "writing_quality": "写作质量"
+      }
     },
     "messages": {
       "replaying": "回放中",

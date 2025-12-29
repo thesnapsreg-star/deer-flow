@@ -9,7 +9,7 @@ import os
 from typing import Annotated, Any, List, Optional, cast
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import AIMessageChunk, BaseMessage, ToolMessage
@@ -17,10 +17,11 @@ from langgraph.checkpoint.mongodb import AsyncMongoDBSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command
+from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from src.config.configuration import get_recursion_limit
-from src.config.loader import get_bool_env, get_str_env
+from src.config.loader import get_bool_env, get_int_env, get_str_env
 from src.config.report_style import ReportStyle
 from src.config.tools import SELECTED_RAG_PROVIDER
 from src.graph.builder import build_graph_with_memory
@@ -34,6 +35,7 @@ from src.podcast.graph.builder import build_graph as build_podcast_graph
 from src.ppt.graph.builder import build_graph as build_ppt_graph
 from src.prompt_enhancer.graph.builder import build_graph as build_prompt_enhancer_graph
 from src.prose.graph.builder import build_graph as build_prose_graph
+from src.eval import ReportEvaluator
 from src.rag.builder import build_retriever
 from src.rag.milvus import load_examples as load_milvus_examples
 from src.rag.qdrant import load_examples as load_qdrant_examples
@@ -46,6 +48,7 @@ from src.server.chat_request import (
     GenerateProseRequest,
     TTSRequest,
 )
+from src.server.eval_request import EvaluateReportRequest, EvaluateReportResponse
 from src.server.config_request import ConfigResponse
 from src.server.mcp_request import MCPServerMetadataRequest, MCPServerMetadataResponse
 from src.server.mcp_utils import load_mcp_tools
@@ -73,10 +76,135 @@ if os.name == "nt":
 
 INTERNAL_SERVER_ERROR_DETAIL = "Internal Server Error"
 
+# Global connection pools (initialized at startup if configured)
+_pg_pool: Optional[AsyncConnectionPool] = None
+_pg_checkpointer: Optional[AsyncPostgresSaver] = None
+
+# Global MongoDB connection (initialized at startup if configured)
+_mongo_client: Optional[Any] = None
+_mongo_checkpointer: Optional[AsyncMongoDBSaver] = None
+
+
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(app):
+    """
+    Application lifecycle manager
+    - Startup: Register asyncio exception handler and initialize global connection pools
+    - Shutdown: Clean up global connection pools
+    """
+    global _pg_pool, _pg_checkpointer, _mongo_client, _mongo_checkpointer
+
+    # ========== STARTUP ==========
+    try:
+        asyncio.get_running_loop()
+
+    except RuntimeError as e:
+        logger.warning(f"Could not register asyncio exception handler: {e}")
+
+    # Initialize global connection pool based on configuration
+    checkpoint_saver = get_bool_env("LANGGRAPH_CHECKPOINT_SAVER", False)
+    checkpoint_url = get_str_env("LANGGRAPH_CHECKPOINT_DB_URL", "")
+
+    if not checkpoint_saver or not checkpoint_url:
+        logger.info("Checkpoint saver not configured, skipping connection pool initialization")
+    else:
+        # Initialize PostgreSQL connection pool
+        if checkpoint_url.startswith("postgresql://"):
+            pool_min_size = get_int_env("PG_POOL_MIN_SIZE", 5)
+            pool_max_size = get_int_env("PG_POOL_MAX_SIZE", 20)
+            pool_timeout = get_int_env("PG_POOL_TIMEOUT", 60)
+
+            connection_kwargs = {
+                "autocommit": True,
+                "prepare_threshold": 0,
+                "row_factory": dict_row,
+            }
+
+            logger.info(
+                f"Initializing global PostgreSQL connection pool: "
+                f"min_size={pool_min_size}, max_size={pool_max_size}, timeout={pool_timeout}s"
+            )
+
+            try:
+                _pg_pool = AsyncConnectionPool(
+                    checkpoint_url,
+                    kwargs=connection_kwargs,
+                    min_size=pool_min_size,
+                    max_size=pool_max_size,
+                    timeout=pool_timeout,
+                )
+                await _pg_pool.open()
+
+                _pg_checkpointer = AsyncPostgresSaver(_pg_pool)
+                await _pg_checkpointer.setup()
+
+                logger.info("Global PostgreSQL connection pool initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize PostgreSQL connection pool: {e}")
+                _pg_pool = None
+                _pg_checkpointer = None
+                raise RuntimeError(
+                    "Checkpoint persistence is explicitly configured with PostgreSQL, "
+                    "but initialization failed. Application will not start."
+                ) from e
+
+        # Initialize MongoDB connection pool
+        elif checkpoint_url.startswith("mongodb://"):
+            try:
+                from motor.motor_asyncio import AsyncIOMotorClient
+
+                # MongoDB connection pool settings
+                mongo_max_pool_size = get_int_env("MONGO_MAX_POOL_SIZE", 20)
+                mongo_min_pool_size = get_int_env("MONGO_MIN_POOL_SIZE", 5)
+
+                logger.info(
+                    f"Initializing global MongoDB connection pool: "
+                    f"min_pool_size={mongo_min_pool_size}, max_pool_size={mongo_max_pool_size}"
+                )
+
+                _mongo_client = AsyncIOMotorClient(
+                    checkpoint_url,
+                    maxPoolSize=mongo_max_pool_size,
+                    minPoolSize=mongo_min_pool_size,
+                )
+
+                # Create the MongoDB checkpointer using the global client
+                _mongo_checkpointer = AsyncMongoDBSaver(_mongo_client)
+                await _mongo_checkpointer.setup()
+
+                logger.info("Global MongoDB connection pool initialized successfully")
+            except ImportError:
+                logger.error("motor package not installed. Please install it with: pip install motor")
+                raise RuntimeError("MongoDB checkpoint persistence is configured but the 'motor' package is not installed. Aborting startup.")
+            except Exception as e:
+                logger.error(f"Failed to initialize MongoDB connection pool: {e}")
+                raise RuntimeError(f"MongoDB checkpoint persistence is configured but could not be initialized: {e}")
+
+    # ========== YIELD - Application runs here ==========
+    yield
+
+    # ========== SHUTDOWN ==========
+    # Close PostgreSQL connection pool
+    if _pg_pool:
+        logger.info("Closing global PostgreSQL connection pool")
+        await _pg_pool.close()
+        logger.info("Global PostgreSQL connection pool closed")
+
+    # Close MongoDB connection
+    if _mongo_client:
+        logger.info("Closing global MongoDB connection")
+        _mongo_client.close()
+        logger.info("Global MongoDB connection closed")
+
+
 app = FastAPI(
     title="DeerFlow API",
     description="API for Deer",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # Add CORS middleware
@@ -132,6 +260,7 @@ async def chat_stream(request: ChatRequest):
             request.interrupt_feedback,
             request.mcp_settings if mcp_enabled else {},
             request.enable_background_investigation,
+            request.enable_web_search,
             request.report_style,
             request.enable_deep_thinking,
             request.enable_clarification,
@@ -308,13 +437,16 @@ def _create_event_stream_message(
 
 def _create_interrupt_event(thread_id, event_data):
     """Create interrupt event."""
+    interrupt = event_data["__interrupt__"][0]
+    # Use the 'id' attribute (LangGraph 1.0+) instead of deprecated 'ns[0]'
+    interrupt_id = getattr(interrupt, "id", None) or thread_id
     return _make_event(
         "interrupt",
         {
             "thread_id": thread_id,
-            "id": event_data["__interrupt__"][0].ns[0],
+            "id": interrupt_id,
             "role": "assistant",
-            "content": event_data["__interrupt__"][0].value,
+            "content": interrupt.value,
             "finish_reason": "interrupt",
             "options": [
                 {"text": "Edit plan", "value": "edit_plan"},
@@ -461,7 +593,7 @@ async def _stream_graph_events(
                 if "__interrupt__" in event_data:
                     logger.debug(
                         f"[{safe_thread_id}] Processing interrupt event: "
-                        f"ns={getattr(event_data['__interrupt__'][0], 'ns', 'unknown') if isinstance(event_data['__interrupt__'], (list, tuple)) and len(event_data['__interrupt__']) > 0 else 'unknown'}, "
+                        f"id={getattr(event_data['__interrupt__'][0], 'id', 'unknown') if isinstance(event_data['__interrupt__'], (list, tuple)) and len(event_data['__interrupt__']) > 0 else 'unknown'}, "
                         f"value_len={len(getattr(event_data['__interrupt__'][0], 'value', '')) if isinstance(event_data['__interrupt__'], (list, tuple)) and len(event_data['__interrupt__']) > 0 and hasattr(event_data['__interrupt__'][0], 'value') and hasattr(event_data['__interrupt__'][0].value, '__len__') else 'unknown'}"
                     )
                     yield _create_interrupt_event(thread_id, event_data)
@@ -487,6 +619,11 @@ async def _stream_graph_events(
                 yield event
         
         logger.debug(f"[{safe_thread_id}] Graph event stream completed. Total events: {event_count}")
+    except asyncio.CancelledError:
+        # User cancelled/interrupted the stream - this is normal, not an error
+        logger.info(f"[{safe_thread_id}] Graph event stream cancelled by user after {event_count} events")
+        # Re-raise to signal cancellation properly without yielding an error event
+        raise
     except Exception as e:
         logger.exception(f"[{safe_thread_id}] Error during graph execution")
         yield _make_event(
@@ -509,6 +646,7 @@ async def _astream_workflow_generator(
     interrupt_feedback: str,
     mcp_settings: dict,
     enable_background_investigation: bool,
+    enable_web_search: bool,
     report_style: ReportStyle,
     enable_deep_thinking: bool,
     enable_clarification: bool,
@@ -586,6 +724,7 @@ async def _astream_workflow_generator(
         "max_step_num": max_step_num,
         "max_search_results": max_search_results,
         "mcp_settings": mcp_settings,
+        "enable_web_search": enable_web_search,
         "report_style": report_style.value,
         "enable_deep_thinking": enable_deep_thinking,
         "interrupt_before_tools": interrupt_before_tools,
@@ -601,23 +740,33 @@ async def _astream_workflow_generator(
         f"url_configured={bool(checkpoint_url)}"
     )
     
-    # Handle checkpointer if configured
-    connection_kwargs = {
-        "autocommit": True,
-        "row_factory": "dict_row",
-        "prepare_threshold": 0,
-    }
+    # Handle checkpointer if configured - prefer global connection pools
     if checkpoint_saver and checkpoint_url != "":
-        if checkpoint_url.startswith("postgresql://"):
-            logger.info(f"[{safe_thread_id}] Starting async postgres checkpointer")
-            logger.debug(f"[{safe_thread_id}] Setting up PostgreSQL connection pool")
+        # Try to use global PostgreSQL checkpointer first
+        if checkpoint_url.startswith("postgresql://") and _pg_checkpointer:
+            logger.info(f"[{safe_thread_id}] Using global PostgreSQL connection pool")
+            graph.checkpointer = _pg_checkpointer
+            graph.store = in_memory_store
+            logger.debug(f"[{safe_thread_id}] Starting to stream graph events")
+            async for event in _stream_graph_events(
+                graph, workflow_input, workflow_config, thread_id
+            ):
+                yield event
+            logger.debug(f"[{safe_thread_id}] Graph event streaming completed")
+
+        # Fallback to per-request PostgreSQL connection if global pool not available
+        elif checkpoint_url.startswith("postgresql://"):
+            logger.info(f"[{safe_thread_id}] Global pool unavailable, creating per-request PostgreSQL connection")
+            connection_kwargs = {
+                "autocommit": True,
+                "row_factory": "dict_row",
+                "prepare_threshold": 0,
+            }
             async with AsyncConnectionPool(
                 checkpoint_url, kwargs=connection_kwargs
             ) as conn:
-                logger.debug(f"[{safe_thread_id}] Initializing AsyncPostgresSaver")
                 checkpointer = AsyncPostgresSaver(conn)
                 await checkpointer.setup()
-                logger.debug(f"[{safe_thread_id}] Attaching checkpointer to graph")
                 graph.checkpointer = checkpointer
                 graph.store = in_memory_store
                 logger.debug(f"[{safe_thread_id}] Starting to stream graph events")
@@ -627,13 +776,24 @@ async def _astream_workflow_generator(
                     yield event
                 logger.debug(f"[{safe_thread_id}] Graph event streaming completed")
 
-        if checkpoint_url.startswith("mongodb://"):
-            logger.info(f"[{safe_thread_id}] Starting async mongodb checkpointer")
-            logger.debug(f"[{safe_thread_id}] Setting up MongoDB connection")
+        # Try to use global MongoDB checkpointer first
+        elif checkpoint_url.startswith("mongodb://") and _mongo_checkpointer:
+            logger.info(f"[{safe_thread_id}] Using global MongoDB connection pool")
+            graph.checkpointer = _mongo_checkpointer
+            graph.store = in_memory_store
+            logger.debug(f"[{safe_thread_id}] Starting to stream graph events")
+            async for event in _stream_graph_events(
+                graph, workflow_input, workflow_config, thread_id
+            ):
+                yield event
+            logger.debug(f"[{safe_thread_id}] Graph event streaming completed")
+
+        # Fallback to per-request MongoDB connection if global pool not available
+        elif checkpoint_url.startswith("mongodb://"):
+            logger.info(f"[{safe_thread_id}] Global pool unavailable, creating per-request MongoDB connection")
             async with AsyncMongoDBSaver.from_conn_string(
                 checkpoint_url
             ) as checkpointer:
-                logger.debug(f"[{safe_thread_id}] Attaching MongoDB checkpointer to graph")
                 graph.checkpointer = checkpointer
                 graph.store = in_memory_store
                 logger.debug(f"[{safe_thread_id}] Starting to stream graph events")
@@ -644,7 +804,7 @@ async def _astream_workflow_generator(
                 logger.debug(f"[{safe_thread_id}] Graph event streaming completed")
     else:
         logger.debug(f"[{safe_thread_id}] No checkpointer configured, using in-memory graph")
-        # Use graph without MongoDB checkpointer
+        # Use graph without checkpointer
         logger.debug(f"[{safe_thread_id}] Starting to stream graph events")
         async for event in _stream_graph_events(
             graph, workflow_input, workflow_config, thread_id
@@ -751,7 +911,7 @@ async def generate_ppt(request: GeneratePPTRequest):
         report_content = request.content
         print(report_content)
         workflow = build_ppt_graph()
-        final_state = workflow.invoke({"input": report_content})
+        final_state = workflow.invoke({"input": report_content, "locale": request.locale})
         generated_file_path = final_state["generated_file_path"]
         with open(generated_file_path, "rb") as f:
             ppt_bytes = f.read()
@@ -785,6 +945,39 @@ async def generate_prose(request: GenerateProseRequest):
         )
     except Exception as e:
         logger.exception(f"Error occurred during prose generation: {str(e)}")
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
+
+
+@app.post("/api/report/evaluate", response_model=EvaluateReportResponse)
+async def evaluate_report(request: EvaluateReportRequest):
+    """Evaluate report quality using automated metrics and optionally LLM-as-Judge."""
+    try:
+        evaluator = ReportEvaluator(use_llm=request.use_llm)
+
+        if request.use_llm:
+            result = await evaluator.evaluate(
+                request.content, request.query, request.report_style or "default"
+            )
+            return EvaluateReportResponse(
+                metrics=result.metrics.to_dict(),
+                score=result.final_score,
+                grade=result.grade,
+                llm_evaluation=result.llm_evaluation.to_dict()
+                if result.llm_evaluation
+                else None,
+                summary=result.summary,
+            )
+        else:
+            result = evaluator.evaluate_metrics_only(
+                request.content, request.report_style or "default"
+            )
+            return EvaluateReportResponse(
+                metrics=result["metrics"],
+                score=result["score"],
+                grade=result["grade"],
+            )
+    except Exception as e:
+        logger.exception(f"Error occurred during report evaluation: {str(e)}")
         raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
 
 
@@ -888,6 +1081,74 @@ async def rag_resources(request: Annotated[RAGResourceRequest, Query()]):
     if retriever:
         return RAGResourcesResponse(resources=retriever.list_resources(request.query))
     return RAGResourcesResponse(resources=[])
+
+
+MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+ALLOWED_EXTENSIONS = {".md", ".txt"}
+
+
+def _sanitize_filename(filename: str) -> str:
+    """Sanitize filename to prevent path traversal attacks."""
+    # Extract only the base filename, removing any path components
+    basename = os.path.basename(filename)
+    # Remove any null bytes or other dangerous characters
+    sanitized = basename.replace("\x00", "").strip()
+    # Ensure filename is not empty after sanitization
+    if not sanitized or sanitized in (".", ".."):
+        return "unnamed_file"
+    return sanitized
+
+
+@app.post("/api/rag/upload", response_model=Resource)
+async def upload_rag_resource(file: UploadFile):
+    # Validate filename exists
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is required for upload")
+
+    # Sanitize filename to prevent path traversal
+    safe_filename = _sanitize_filename(file.filename)
+
+    # Validate file extension
+    _, ext = os.path.splitext(safe_filename.lower())
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file type. Only {', '.join(ALLOWED_EXTENSIONS)} files are allowed.",
+        )
+
+    # Read content with size limit check
+    content = await file.read()
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="Cannot upload an empty file")
+    if len(content) > MAX_UPLOAD_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size is {MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)} MB.",
+        )
+
+    retriever = build_retriever()
+    if not retriever:
+        raise HTTPException(status_code=500, detail="RAG provider not configured")
+    try:
+        return retriever.ingest_file(content, safe_filename)
+    except NotImplementedError:
+        raise HTTPException(
+            status_code=501, detail="Upload not supported by current RAG provider"
+        )
+    except ValueError as exc:
+        # Invalid user input or unsupported file content; treat as a client error
+        logger.warning("Invalid RAG resource upload: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid RAG resource. Please check the file and try again.",
+        )
+    except RuntimeError as exc:
+        # Internal error during ingestion; log and return a generic server error
+        logger.exception("Runtime error while ingesting RAG resource: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to ingest RAG resource due to an internal error.",
+        )
 
 
 @app.get("/api/config", response_model=ConfigResponse)
